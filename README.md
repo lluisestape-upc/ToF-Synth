@@ -1,6 +1,6 @@
-# LaserHarp
+# ToF-Synth
 
-Instrumento musical basado en Raspberry Pi 4B. Un sensor de distancia láser (VL53L0X) detecta gestos con la mano para generar sonido continuo con glide. Tres botones adicionales tocan un acorde 1-3-5. Un encoder rotativo EC11 y una pantalla OLED SH1106 forman el menú de control de síntesis.
+Instrumento musical basado en Raspberry Pi 4B. Un sensor de distancia láser (VL53L0X) detecta gestos con la mano para generar sonido continuo con glide. 7 botones adicionales tocan una escalera musical. Un encoder rotativo EC11 y una pantalla OLED SH1106 forman el menú de control de síntesis.
 
 ---
 
@@ -12,9 +12,11 @@ Instrumento musical basado en Raspberry Pi 4B. Un sensor de distancia láser (VL
 | Sensor láser | VL53L0X (I2C, 0x29) |
 | Pantalla | SH1106 OLED 128×64 (I2C, 0x3C) |
 | Encoder | EC11 rotativo con pulsador |
-| Botones acorde | 3× pulsador normalmente abierto |
+| Botones acorde | 7× pulsador normalmente abierto |
 
 ### Conexiones GPIO (BCM)
+
+<img width="1222" height="844" alt="image" src="https://github.com/user-attachments/assets/492271b0-70ff-44d3-9860-8bf9f0d1ffec" />
 
 | GPIO | Función |
 |---|---|
@@ -31,6 +33,10 @@ Instrumento musical basado en Raspberry Pi 4B. Un sensor de distancia láser (VL
 Todos los botones conectados entre el GPIO y GND (pull-up interno activo).
 
 ---
+
+## PCB Design
+
+<img width="1282" height="702" alt="image" src="https://github.com/user-attachments/assets/3a41cf8d-af91-498d-83e8-5d5e3ebb37fc" />
 
 ## Software
 
