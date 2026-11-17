@@ -8,10 +8,19 @@ Cableado actual (numeracion BCM / pin fisico):
   DC           GPIO19 (pin 35)
   RES, BLK, VCC -> 3V3 (pin 1), GND -> pin 9
 
+Recorre varias configuraciones (tamano, rotacion, offset) y en cada una
+dibuja un borde blanco de 1 px, esquinas de colores y el numero de config.
+Antes de cada prueba borra toda la memoria de la pantalla (240x320), asi
+no quedan pixeles aleatorios.
+
+Mira cual muestra: borde blanco completo, las 4 esquinas visibles
+(rojo arriba-izq, verde arriba-der, azul abajo-izq, amarillo abajo-der),
+texto legible y sin ruido. Apunta el numero y dimelo.
+
 Uso:
   pip install luma.lcd
-  python3 test_tft.py            # prueba 240x240 y luego 240x320
-  python3 test_tft.py 240 240    # solo un tamano
+  python3 test_tft.py          # todas las configuraciones, 6 s cada una
+  python3 test_tft.py 3        # solo la configuracion 3
 """
 import sys
 import time
@@ -26,21 +35,49 @@ PIN_CS = 13
 PIN_DC = 19
 PIN_RST = None  # RES va fijo a 3V3
 
-if len(sys.argv) == 3:
-    SIZES = [(int(sys.argv[1]), int(sys.argv[2]))]
-else:
-    SIZES = [(240, 240), (240, 320)]
+# (ancho, alto, rotate, h_offset, v_offset)
+CONFIGS = [
+    (240, 240, 0, 0, 0),
+    (240, 240, 1, 0, 0),
+    (240, 240, 2, 0, 80),
+    (240, 240, 3, 80, 0),
+    (240, 320, 0, 0, 0),
+    (240, 320, 2, 0, 0),
+    (320, 240, 1, 0, 0),
+    (320, 240, 3, 0, 0),
+]
 
 serial = bitbang(SCLK=PIN_SCLK, SDA=PIN_SDA, CE=PIN_CS, DC=PIN_DC, RST=PIN_RST)
 
-for w, h in SIZES:
-    print(f"Probando {w}x{h}...")
-    dev = st7789(serial, width=w, height=h, rotate=0)
+
+def clear_all():
+    """Pone a negro toda la RAM del controlador (240x320)."""
+    dev = st7789(serial, width=240, height=320, rotate=0)
+    dev.display(Image.new("RGB", (240, 320), "black"))
+
+
+def pattern(w, h, n):
     img = Image.new("RGB", (w, h), "black")
     d = ImageDraw.Draw(img)
-    d.rectangle((0, 0, w - 1, h // 2), fill="red")
-    d.text((10, 10), f"{w}x{h} OK", fill="white")
-    dev.display(img)
-    time.sleep(8)
+    d.rectangle((0, 0, w - 1, h - 1), outline="white")
+    s = 24
+    d.rectangle((1, 1, s, s), fill="red")
+    d.rectangle((w - 1 - s, 1, w - 2, s), fill="green")
+    d.rectangle((1, h - 1 - s, s, h - 2), fill="blue")
+    d.rectangle((w - 1 - s, h - 1 - s, w - 2, h - 2), fill="yellow")
+    d.text((w // 2 - 40, h // 2 - 10), f"CONFIG {n}", fill="white")
+    d.text((w // 2 - 40, h // 2 + 5), f"{w}x{h}", fill="white")
+    return img
+
+
+sel = [int(sys.argv[1])] if len(sys.argv) > 1 else range(1, len(CONFIGS) + 1)
+
+for n in sel:
+    w, h, rot, ho, vo = CONFIGS[n - 1]
+    print(f"Config {n}: {w}x{h} rotate={rot} h_offset={ho} v_offset={vo}")
+    clear_all()
+    dev = st7789(serial, width=w, height=h, rotate=rot, h_offset=ho, v_offset=vo)
+    dev.display(pattern(w, h, n))
+    time.sleep(6)
 
 print("Fin.")
