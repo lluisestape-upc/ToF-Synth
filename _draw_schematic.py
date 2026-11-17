@@ -1,4 +1,4 @@
-"""Genera schematic.png — diagrama de conexiones del LaserHarp."""
+"""Genera schematic_gpio.png — diagrama de conexiones del LaserHarp."""
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -220,8 +220,8 @@ for i, (n, f, g) in enumerate([
             ha='left', va='center', fontsize=7, color='#90a4ae')
 
 plt.tight_layout(pad=0.2)
-plt.savefig('schematic.png', dpi=150, bbox_inches='tight',
+plt.savefig('schematic_gpio.png', dpi=150, bbox_inches='tight',
             facecolor=BG, edgecolor='none')
-plt.savefig('schematic.pdf', bbox_inches='tight',
+plt.savefig('schematic_gpio.pdf', bbox_inches='tight',
             facecolor=BG, edgecolor='none')
-print("Generados: schematic.png  schematic.pdf")
+print("Generados: schematic_gpio.png  schematic_gpio.pdf")
