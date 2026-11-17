@@ -116,14 +116,14 @@ ls /dev/spidev*   # debe salir /dev/spidev4.0
 Para que `main.py` se ejecute solo al enchufar la Raspberry:
 
 ```bash
-bash install_autostart.sh
+bash install_autostart.sh   # sin sudo; si usas venv, actívalo antes
 ```
 
 | Acción | Comando |
 |---|---|
-| Ver estado | `systemctl --user status tof-synth` |
-| Ver mensajes / errores | `journalctl --user -u tof-synth -f` |
-| Parar (p. ej. para lanzarlo a mano) | `systemctl --user stop tof-synth` |
-| Quitar el arranque automático | `systemctl --user disable --now tof-synth` |
+| Ver estado | `sudo systemctl status tof-synth` |
+| Ver mensajes / errores | `sudo journalctl -u tof-synth -b` |
+| Parar (p. ej. para lanzarlo a mano) | `sudo systemctl stop tof-synth` |
+| Quitar el arranque automático | `sudo systemctl disable --now tof-synth` |
 
 Si lo lanzas a mano con `python3 main.py` mientras el servicio está activo, los dos chocan por los pines. Para el servicio antes.
