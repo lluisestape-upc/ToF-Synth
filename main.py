@@ -314,6 +314,8 @@ disp = st7789.ST7789(
     width=170, height=320, rotation=270, x_offset=35,
     baudrate=24000000,
 )
+# Borra la RAM de la pantalla: al encender en frío está llena de basura
+disp.image(Image.new('RGB', (W, H), (0, 0, 0)))
 
 try:
     _B = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
@@ -528,9 +530,63 @@ def draw_menu_screen():
     disp.image(img)
 
 # ── Audio stream ───────────────────────────────────────────────────────────────
-stream = sd.OutputStream(samplerate=SR, channels=2, dtype='float32',
-                          blocksize=BLOCK, callback=callback, device=1)
-stream.start()
+# Antes estaba fijo device=1, pero los índices de audio cambian según haya HDMI
+# conectado o no al arrancar. Ahora se elige por nombre y se reintenta hasta
+# que el audio esté listo. Para forzar una salida: AUDIO_DEVICE=<nombre o índice>
+import os
+
+AUDIO_PREFS = ['usb', 'headphones', 'bcm2835', 'pipewire', 'pulse', 'default']
+
+def _status_screen(line1, line2=''):
+    img = Image.new('RGB', (W, H), (0, 10, 30))
+    d   = ImageDraw.Draw(img)
+    d.text((60, 55),  'ToF Synth', font=FONT_LG, fill=(0, 200, 255))
+    d.text((20, 100), line1,       font=FONT_SM, fill=(200, 200, 200))
+    d.text((20, 120), line2[:44],  font=FONT_SM, fill=(120, 120, 120))
+    disp.image(img)
+
+def _audio_candidates():
+    outs = [(i, d['name']) for i, d in enumerate(sd.query_devices())
+            if d['max_output_channels'] >= 2]
+    forced = os.environ.get('AUDIO_DEVICE', '').strip()
+    if forced:
+        if forced.isdigit():
+            return [(int(forced), f'#{forced}')]
+        return [(i, n) for i, n in outs if forced.lower() in n.lower()]
+    ordered = []
+    for pref in AUDIO_PREFS:
+        ordered += [(i, n) for i, n in outs
+                    if pref in n.lower() and (i, n) not in ordered]
+    ordered += [(i, n) for i, n in outs
+                if (i, n) not in ordered and 'hdmi' not in n.lower()]
+    ordered += [(i, n) for i, n in outs if (i, n) not in ordered]   # HDMI al final
+    return ordered
+
+def open_audio():
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            sd._terminate(); sd._initialize()   # vuelve a leer los dispositivos
+        except Exception:
+            pass
+        cands = _audio_candidates()
+        if attempt == 1:
+            print('[AUDIO] salidas:', cands)
+        for idx, name in cands:
+            try:
+                st = sd.OutputStream(samplerate=SR, channels=2, dtype='float32',
+                                     blocksize=BLOCK, callback=callback, device=idx)
+                st.start()
+                print(f'[AUDIO] usando #{idx}: {name}')
+                return st
+            except Exception as e:
+                print(f'[AUDIO] #{idx} {name} falla: {e}')
+        _status_screen('Esperando audio...', f'intento {attempt}')
+        time.sleep(2)
+
+_status_screen('Arrancando...')
+stream = open_audio()
 
 # Boot screen
 boot = Image.new('RGB', (W, H), (0, 10, 30))
