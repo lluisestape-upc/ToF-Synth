@@ -98,3 +98,32 @@ pip install adafruit-circuitpython-vl53l0x adafruit-circuitpython-rgb-display \
 ```
 
 (`luma.lcd` solo hace falta para `test_tft.py`.)
+
+### Activar SPI4 (una sola vez)
+
+La pantalla usa el bus SPI4 de la Pi 4 (GPIO7/GPIO6), que viene apagado. Sin esto `main.py` da `/dev/spidev4.0 does not exist`:
+
+```bash
+echo 'dtoverlay=spi4-1cs' | sudo tee -a /boot/firmware/config.txt   # en OS antiguos: /boot/config.txt
+sudo reboot
+ls /dev/spidev*   # debe salir /dev/spidev4.0
+```
+
+---
+
+## Arranque automático
+
+Para que `main.py` se ejecute solo al enchufar la Raspberry:
+
+```bash
+bash install_autostart.sh
+```
+
+| Acción | Comando |
+|---|---|
+| Ver estado | `systemctl --user status tof-synth` |
+| Ver mensajes / errores | `journalctl --user -u tof-synth -f` |
+| Parar (p. ej. para lanzarlo a mano) | `systemctl --user stop tof-synth` |
+| Quitar el arranque automático | `systemctl --user disable --now tof-synth` |
+
+Si lo lanzas a mano con `python3 main.py` mientras el servicio está activo, los dos chocan por los pines. Para el servicio antes.
