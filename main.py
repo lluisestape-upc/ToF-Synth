@@ -42,9 +42,14 @@ class ArpaMain:
 
     # ── INIT ────────────────────────────────────────────────────────────────
     def __init__(self):
-        # Parámetros de audio (lock para seguridad entre threads)
         self._lock   = threading.Lock()
-        self._params = {'adsr': [2, 4, 6, 3], 'osc': 'SINE', 'reverb': 10}
+        self._params = {
+            'adsr':        [2, 4, 6, 3],
+            'osc':         'SINE',
+            'reverb':      10,
+            'sensor_mode': 'INSTRUMENTO',   # 'INSTRUMENTO' | 'EFECTOS'
+            'effect_type': 'WOBBLE',         # 'WOBBLE' | 'PHASER' | 'PITCH'
+        }
 
         # Voz del sensor — glide continuo
         self._sv_phase  = 0.0
@@ -58,7 +63,7 @@ class ArpaMain:
             {'phase': 0.0, 'stage': 'off', 'env': 0.0, 'pt': 0.0, 'renv': 0.0}
             for _ in range(3)
         ]
-        self._note_q    = []   # cola de eventos note-on/off (thread-safe)
+        self._note_q    = []
         self._note_lock = threading.Lock()
 
         # Reverb
@@ -67,10 +72,15 @@ class ArpaMain:
         self._rev_pos = 0
         self._rev_len = rl
 
+        # Efectos — estado DSP
+        self._fx_depth  = 0.0        # 0..1 leído por audio callback (escrito por sensor loop)
+        self._lfo_phase = 0.0        # fase acumulada para wobble
+        self._ap_state  = [(0.0, 0.0)] * 4   # (prev_x, prev_y) por stage del phaser
+
         # Grabación
         self._rec = []
 
-        # Sensor VL53L0X en hilo propio (bloquea ~20 ms por lectura)
+        # Sensor VL53L0X en hilo propio (~20 ms por lectura)
         self._running = True
         i2c = busio.I2C(board.SCL, board.SDA)
         self._sensor = adafruit_vl53l0x.VL53L0X(i2c)
@@ -89,11 +99,14 @@ class ArpaMain:
         serial   = luma_i2c(port=1, address=OLED_ADDR)
         self.dev = sh1106(serial, rotate=0)
 
-        # Estado del menú
+        # ── Menú ───────────────────────────────────────────────────────────
+        # "SENSOR" controla el modo del sensor (voz o efectos)
+        # "EFECTOS" controla parámetros de audio (reverb/delay/distorsión)
         self.menu_tree = {
             "INSTRUMENT": ["Change Type", "Visual ADSR", "Back"],
             "MIXING":     ["Visual EQ", "Compressor", "Limiter", "Back"],
-            "EFFECTS":    ["Reverb", "Delay", "Distortion", "Back"],
+            "EFECTOS":    ["Reverb", "Delay", "Distortion", "Back"],
+            "SENSOR":     ["Modo", "Efecto", "Back"],
             "CONFIG":     ["MIDI Channel", "Calibration", "Back"],
         }
         self.state        = "MENU"
@@ -118,6 +131,12 @@ class ArpaMain:
         self.midi_channel = 1
         self.calib_step   = 0
 
+        # Modo sensor
+        self.sensor_mode_list = ['INSTRUMENTO', 'EFECTOS']
+        self.sensor_mode_idx  = 0
+        self.effect_list      = ['WOBBLE', 'PHASER', 'PITCH']
+        self.effect_idx       = 0
+
         # GPIO
         GPIO.setmode(GPIO.BCM)
         for pin in [PIN_A, PIN_B, PIN_BTN, PIN_DOWN, PIN_EC11] + BTN_PINS:
@@ -134,13 +153,21 @@ class ArpaMain:
     def _sensor_loop(self):
         while self._running:
             try:
-                dist = self._sensor.range
-                if dist < 500:
-                    self._sv_vol_t  = 1.0
-                    self._sv_freq_t = FREQ_BASE * (1.0 + dist / 500.0)
-                else:
+                dist     = self._sensor.range
+                in_range = dist < 500
+
+                # Leer modo bajo lock para garantizar consistencia con audio callback
+                with self._lock:
+                    mode = self._params['sensor_mode']
+
+                if mode == 'INSTRUMENTO':
+                    self._sv_vol_t  = 1.0 if in_range else 0.0
+                    self._sv_freq_t = FREQ_BASE * (1.0 + dist / 500.0) if in_range else FREQ_BASE
+                    self._fx_depth  = 0.0
+                else:  # EFECTOS
                     self._sv_vol_t  = 0.0
                     self._sv_freq_t = FREQ_BASE
+                    self._fx_depth  = max(0.0, (500.0 - dist) / 500.0) if in_range else 0.0
             except Exception:
                 pass
 
@@ -159,31 +186,63 @@ class ArpaMain:
             elif bv['stage'] not in ('off', 'release'):
                 bv['renv'] = bv['env']; bv['stage'] = 'release'; bv['pt'] = 0.0
 
-        t   = np.arange(frames, dtype=np.float64) / SR
-        mix = np.zeros(frames, dtype=np.float32)
+        t           = np.arange(frames, dtype=np.float64) / SR
+        mix         = np.zeros(frames, dtype=np.float32)
+        sensor_mode = p['sensor_mode']
+        effect_type = p['effect_type']
+        depth       = self._fx_depth   # escrito solo por sensor thread
 
-        # Voz sensor — glide + envolvente suave
-        self._sv_freq_c += (self._sv_freq_t - self._sv_freq_c) * 0.15
-        vv = 0.3 if self._sv_vol_t > self._sv_vol_c else 0.2
-        self._sv_vol_c  += (self._sv_vol_t - self._sv_vol_c) * vv
-        if self._sv_vol_c < 0.001:
+        # ── Voz sensor (SOLO en modo INSTRUMENTO) ──────────────────────────
+        if sensor_mode == 'INSTRUMENTO':
+            self._sv_freq_c += (self._sv_freq_t - self._sv_freq_c) * 0.15
+            vv = 0.3 if self._sv_vol_t > self._sv_vol_c else 0.2
+            self._sv_vol_c  += (self._sv_vol_t - self._sv_vol_c) * vv
+            if self._sv_vol_c < 0.001:
+                self._sv_vol_c = 0.0
+            mix += self._wave(p['osc'], 2*np.pi*self._sv_freq_c*t + self._sv_phase) * self._sv_vol_c
+            self._sv_phase = (self._sv_phase + 2*np.pi*self._sv_freq_c*frames/SR) % (2*np.pi)
+        else:
+            # Apagar voz sensor completamente
             self._sv_vol_c = 0.0
-        mix += self._wave(p['osc'], 2*np.pi*self._sv_freq_c*t + self._sv_phase) * self._sv_vol_c
-        self._sv_phase = (self._sv_phase + 2*np.pi*self._sv_freq_c*frames/SR) % (2*np.pi)
 
-        # Voces acorde — ADSR
+        # ── Voces acorde — ADSR ────────────────────────────────────────────
         att = self._map(p['adsr'][0], 0.01, 2.0)
         dec = self._map(p['adsr'][1], 0.01, 2.0)
         sus = self._map(p['adsr'][2], 0.0,  1.0)
         rel = self._map(p['adsr'][3], 0.01, 3.0)
 
+        # Pitch shift: sensor desplaza ±1 oct sobre las notas de botón
+        pitch_mult = 1.0
+        if sensor_mode == 'EFECTOS' and effect_type == 'PITCH' and depth > 0.0:
+            pitch_mult = 2.0 ** ((depth * 24.0 - 12.0) / 12.0)
+
         for i, bv in enumerate(self._bv):
             if bv['stage'] == 'off':
                 continue
-            freq = FREQ_BASE * CHORD[i]
+            freq = FREQ_BASE * CHORD[i] * pitch_mult
             env  = self._adsr_block(bv, att, dec, sus, rel, frames)
             mix += self._wave(p['osc'], 2*np.pi*freq*t + bv['phase']) * env
             bv['phase'] = (bv['phase'] + 2*np.pi*freq*frames/SR) % (2*np.pi)
+
+        # ── Efectos del sensor sobre la mezcla (solo modo EFECTOS) ────────
+        if sensor_mode == 'EFECTOS' and depth > 0.01:
+            if effect_type == 'WOBBLE':
+                rate  = 1.0 + depth * 11.0   # 1..12 Hz
+                t_lfo = np.arange(frames, dtype=np.float64) / SR
+                lfo   = (1.0 - depth * 0.5) + depth * 0.5 * np.sin(
+                    2 * np.pi * rate * t_lfo + self._lfo_phase
+                )
+                self._lfo_phase = (self._lfo_phase + 2*np.pi*rate*frames/SR) % (2*np.pi)
+                mix = (mix * lfo).astype(np.float32)
+
+            elif effect_type == 'PHASER':
+                # 4 filtros all-pass en cascada; la mano barre los notches
+                a   = depth * 0.97
+                wet = mix.copy()
+                for stage in range(4):
+                    wet = self._allpass_block(wet, a, stage)
+                mix = ((mix + wet) * 0.5).astype(np.float32)
+            # PITCH: aplicado en la generación de voces via pitch_mult
 
         # Reverb
         if p['reverb'] > 0:
@@ -228,6 +287,18 @@ class ArpaMain:
         bv['env'] = float(env[-1])
         return env.astype(np.float32)
 
+    def _allpass_block(self, x, a, stage_idx):
+        """Filtro all-pass primer orden: y[n] = -a*x[n] + x[n-1] + a*y[n-1]."""
+        prev_x, prev_y = self._ap_state[stage_idx]
+        y = np.empty(len(x), dtype=np.float32)
+        for n in range(len(x)):
+            xn = float(x[n])
+            yn = -a * xn + prev_x + a * prev_y
+            prev_x, prev_y = xn, yn
+            y[n] = yn
+        self._ap_state[stage_idx] = (prev_x, prev_y)
+        return y
+
     def _reverb(self, block, wet):
         n, pos = len(block), self._rev_pos
         end    = pos + n
@@ -237,8 +308,8 @@ class ArpaMain:
         else:
             sp = self._rev_len - pos
             delayed = np.concatenate([self._rev_buf[pos:].copy(), self._rev_buf[:n-sp].copy()])
-            self._rev_buf[pos:]    = block[:sp]   + self._rev_buf[pos:]    * 0.4
-            self._rev_buf[:n-sp]   = block[sp:]   + self._rev_buf[:n-sp]  * 0.4
+            self._rev_buf[pos:]    = block[:sp]  + self._rev_buf[pos:]   * 0.4
+            self._rev_buf[:n-sp]   = block[sp:]  + self._rev_buf[:n-sp] * 0.4
         self._rev_pos = end % self._rev_len
         return (block * (1 - wet) + delayed * wet).astype(np.float32)
 
@@ -253,9 +324,11 @@ class ArpaMain:
     def _sync_params(self):
         with self._lock:
             self._params = {
-                'adsr':   list(self.adsr_vals),
-                'osc':    self.osc_types[self.osc_index],
-                'reverb': self.fx_val,
+                'adsr':        list(self.adsr_vals),
+                'osc':         self.osc_types[self.osc_index],
+                'reverb':      self.fx_val,
+                'sensor_mode': self.sensor_mode_list[self.sensor_mode_idx],
+                'effect_type': self.effect_list[self.effect_idx],
             }
 
     # ── BUCLE PRINCIPAL ─────────────────────────────────────────────────────
@@ -308,17 +381,19 @@ class ArpaMain:
     # ── RENDER ──────────────────────────────────────────────────────────────
     def render(self):
         fn = {
-            "MENU":            self.draw_menu,
-            "EDIT_ADSR":       self.draw_adsr,
-            "EDIT_EQ":         self.draw_eq,
-            "EDIT_FX":         self.draw_fx,
-            "EDIT_INSTRUMENT": self.draw_instrument,
-            "EDIT_COMP":       self.draw_comp,
-            "EDIT_LIM":        self.draw_lim,
-            "EDIT_DELAY":      self.draw_delay,
-            "EDIT_DIST":       self.draw_dist,
-            "EDIT_MIDI":       self.draw_midi,
-            "EDIT_CALIB":      self.draw_calib,
+            "MENU":             self.draw_menu,
+            "EDIT_ADSR":        self.draw_adsr,
+            "EDIT_EQ":          self.draw_eq,
+            "EDIT_FX":          self.draw_fx,
+            "EDIT_INSTRUMENT":  self.draw_instrument,
+            "EDIT_COMP":        self.draw_comp,
+            "EDIT_LIM":         self.draw_lim,
+            "EDIT_DELAY":       self.draw_delay,
+            "EDIT_DIST":        self.draw_dist,
+            "EDIT_MIDI":        self.draw_midi,
+            "EDIT_CALIB":       self.draw_calib,
+            "EDIT_SENSOR_MODE": self.draw_sensor_mode,
+            "EDIT_EFFECT_TYPE": self.draw_effect_type,
         }.get(self.state)
         if fn:
             try: fn()
@@ -434,6 +509,27 @@ class ArpaMain:
             draw.text((0, 10), l1, font=FONT, fill="white")
             draw.text((0, 32), l2, font=FONT, fill="white")
 
+    def draw_sensor_mode(self):
+        mode = self.sensor_mode_list[self.sensor_mode_idx]
+        n    = len(self.sensor_mode_list)
+        with canvas(self.dev) as draw:
+            draw.text((0, 0),  "MODO SENSOR", font=FONT, fill="white")
+            draw.text((0, 16), f"{self.sensor_mode_idx+1}/{n}: {mode}", font=FONT, fill="white")
+            if mode == 'EFECTOS':
+                eff = self.effect_list[self.effect_idx]
+                draw.text((0, 38), f"Efecto: {eff}", font=FONT, fill="white")
+            else:
+                draw.text((0, 38), "Sensor=voz", font=FONT, fill="white")
+
+    def draw_effect_type(self):
+        eff   = self.effect_list[self.effect_idx]
+        n     = len(self.effect_list)
+        descs = {'WOBBLE': 'Tremolo', 'PHASER': 'Phaser', 'PITCH': 'Pitch shift'}
+        with canvas(self.dev) as draw:
+            draw.text((0, 0),  "TIPO EFECTO", font=FONT, fill="white")
+            draw.text((0, 16), f"{self.effect_idx+1}/{n}: {eff}", font=FONT, fill="white")
+            draw.text((0, 38), descs.get(eff, ''), font=FONT, fill="white")
+
     # ── LÓGICA DE MENÚ ──────────────────────────────────────────────────────
     def rotate(self, direction):
         if self.state == "MENU":
@@ -465,6 +561,12 @@ class ArpaMain:
             self.dist_val = max(0, min(7, self.dist_val - direction))
         elif self.state == "EDIT_MIDI":
             self.midi_channel = max(1, min(16, self.midi_channel - direction))
+        elif self.state == "EDIT_SENSOR_MODE":
+            self.sensor_mode_idx = (self.sensor_mode_idx - direction) % len(self.sensor_mode_list)
+            self._sync_params()
+        elif self.state == "EDIT_EFFECT_TYPE":
+            self.effect_idx = (self.effect_idx - direction) % len(self.effect_list)
+            self._sync_params()
         self.render()
 
     def press(self):
@@ -473,16 +575,18 @@ class ArpaMain:
             if sel == "Back":
                 if self.current_path: self.current_path.pop()
                 self.cursor_pos = self.scroll_off = 0
-            elif sel == "Visual ADSR":   self.state = "EDIT_ADSR";  self.adsr_stage = 0
-            elif sel == "Visual EQ":     self.state = "EDIT_EQ";    self.eq_band = 0
-            elif sel == "Reverb":        self.state = "EDIT_FX"
-            elif sel == "Change Type":   self.state = "EDIT_INSTRUMENT"
-            elif sel == "Compressor":    self.state = "EDIT_COMP";  self.comp_stage = 0
-            elif sel == "Limiter":       self.state = "EDIT_LIM"
-            elif sel == "Delay":         self.state = "EDIT_DELAY"; self.delay_stage = 0
-            elif sel == "Distortion":    self.state = "EDIT_DIST"
-            elif sel == "MIDI Channel":  self.state = "EDIT_MIDI"
-            elif sel == "Calibration":   self.state = "EDIT_CALIB"; self.calib_step = 0
+            elif sel == "Visual ADSR":  self.state = "EDIT_ADSR";  self.adsr_stage = 0
+            elif sel == "Visual EQ":    self.state = "EDIT_EQ";    self.eq_band = 0
+            elif sel == "Reverb":       self.state = "EDIT_FX"
+            elif sel == "Change Type":  self.state = "EDIT_INSTRUMENT"
+            elif sel == "Compressor":   self.state = "EDIT_COMP";  self.comp_stage = 0
+            elif sel == "Limiter":      self.state = "EDIT_LIM"
+            elif sel == "Delay":        self.state = "EDIT_DELAY"; self.delay_stage = 0
+            elif sel == "Distortion":   self.state = "EDIT_DIST"
+            elif sel == "MIDI Channel": self.state = "EDIT_MIDI"
+            elif sel == "Calibration":  self.state = "EDIT_CALIB"; self.calib_step = 0
+            elif sel == "Modo":         self.state = "EDIT_SENSOR_MODE"
+            elif sel == "Efecto":       self.state = "EDIT_EFFECT_TYPE"
             elif sel in self.menu_tree:
                 self.current_path.append(sel); self.cursor_pos = self.scroll_off = 0
         elif self.state == "EDIT_ADSR":
@@ -491,7 +595,8 @@ class ArpaMain:
         elif self.state == "EDIT_EQ":
             self.eq_band += 1
             if self.eq_band > 2: self.state = "MENU"; self.eq_band = 0; self._saved(); return
-        elif self.state in ("EDIT_FX", "EDIT_INSTRUMENT", "EDIT_LIM", "EDIT_DIST", "EDIT_MIDI"):
+        elif self.state in ("EDIT_FX", "EDIT_INSTRUMENT", "EDIT_LIM", "EDIT_DIST",
+                            "EDIT_MIDI", "EDIT_SENSOR_MODE", "EDIT_EFFECT_TYPE"):
             self.state = "MENU"; self._saved(); return
         elif self.state == "EDIT_COMP":
             self.comp_stage += 1
