@@ -1,6 +1,6 @@
 # ToF-Synth
 
-Instrumento musical basado en Raspberry Pi 4B. Un sensor de distancia láser (VL53L0X) detecta gestos con la mano para generar sonido continuo con glide. 7 botones adicionales tocan una escalera musical. Un encoder rotativo EC11 y una pantalla OLED SH1106 forman el menú de control de síntesis.
+Sintetizador basado en Raspberry Pi 4B con una PCB propia encima (Synthesizer ToF v1.0.0). Siete teclas tocan las notas de la escala elegida y un sensor de distancia láser VL53L0X controla el trémolo con la mano. El menú se maneja con un encoder rotativo y una pantalla TFT a color ST7789.
 
 ---
 
@@ -9,28 +9,31 @@ Instrumento musical basado en Raspberry Pi 4B. Un sensor de distancia láser (VL
 | Componente | Detalle |
 |---|---|
 | Ordenador | Raspberry Pi 4B |
-| Sensor láser | VL53L0X (I2C, 0x29) |
-| Pantalla | SH1106 OLED 128×64 (I2C, 0x3C) |
-| Encoder | EC11 rotativo con pulsador |
-| Botones acorde | 7× pulsador normalmente abierto |
+| PCB | Synthesizer ToF v1.0.0 (192.35 × 104.5 mm), montada sobre la Pi con extensores de GPIO |
+| Sensor láser | VL53L0X por I2C (0x29; también se prueban 0x30–0x32) |
+| Pantalla | TFT ST7789 de 170×320 a color, **SPI por software** (no I2C) |
+| Encoder | Rotativo con pulsador |
+| Teclas | 7 pulsadores (KEY1–KEY7) + OCT▲ / OCT▼ |
 
 ### Conexiones GPIO (BCM)
 
-<img width="1222" height="844" alt="image" src="https://github.com/user-attachments/assets/492271b0-70ff-44d3-9860-8bf9f0d1ffec" />
-
-| GPIO | Función |
+| GPIO (pin físico) | Función |
 |---|---|
-| 2 (SDA) / 3 (SCL) | I2C compartido — sensor + pantalla |
-| 5 | Botón acorde — 1ª (Do, raíz) |
-| 6 | Botón acorde — 3ª (Mi) |
-| 22 | Encoder B |
-| 23 | Botón enter |
-| 24 | Botón bajar menú |
-| 25 | Encoder pulsador (D) |
-| 26 | Botón acorde — 5ª (Sol) |
-| 27 | Encoder A |
+| 2 (3) / 3 (5) | I2C — sensor VL53L0X (SDA / SCL) |
+| 7 (26) | Pantalla SCL (reloj SPI) |
+| 6 (31) | Pantalla SDA (MOSI) |
+| 13 (33) | Pantalla CS |
+| 19 (35) | Pantalla DC |
+| 26 (37) | Pantalla RST en el código (en el montaje actual RES va fijo a 3V3) |
+| 21, 15, 18, 16, 23, 24, 25 | KEY1 … KEY7 (de izquierda a derecha) |
+| 27 / 17 | Encoder A / B |
+| 22 | Pulsador del encoder |
+| 10 | OCT▲ |
+| 9 | OCT▼ |
 
-Todos los botones conectados entre el GPIO y GND (pull-up interno activo).
+BLK y VCC de la pantalla van a 3V3. Todos los botones van entre el GPIO y GND (pull-up interno).
+
+> La pantalla es SPI: **no aparece en `i2cdetect`** y eso es normal. Para comprobar el cableado usa `test_tft.py`.
 
 ---
 
@@ -38,76 +41,60 @@ Todos los botones conectados entre el GPIO y GND (pull-up interno activo).
 
 <img width="1282" height="702" alt="image" src="https://github.com/user-attachments/assets/3a41cf8d-af91-498d-83e8-5d5e3ebb37fc" />
 
+---
+
 ## Software
 
-### `main.py` — Aplicación principal
+### `main.py`: aplicación principal
 
-Ejecutar en la Raspberry Pi:
-
-```bash
-python main.py
-```
-
-**Síntesis de audio:**
-- **Sensor láser** → voz continua con glide de frecuencia (distancia < 500 mm activa la nota; la distancia modula el pitch alrededor de Do4)
-- **Botones GPIO 5 / 6 / 26** → acorde mayor 1-3-5 (Do / Mi / Sol) con envolvente ADSR completa
-- **Reverb** tipo comb-filter aplicado a la mezcla total
-- Formas de onda seleccionables: SINE, SAW, SQUARE, TRIANGLE
-- Graba todo el audio; al salir con Ctrl+C guarda `grabacion_arpa.wav`
-
-**Menú OLED (EC11 + botones):**
-
-| Control | Acción |
-|---|---|
-| Girar encoder | Navegar / ajustar valor |
-| Botón 23 o EC11-D (25) | Entrar / confirmar |
-| Botón 24 | Bajar en el menú |
-
-```
-INSTRUMENT → Change Type (forma de onda) | Visual ADSR
-MIXING     → Visual EQ | Compressor | Limiter
-EFFECTS    → Reverb | Delay | Distortion
-CONFIG     → MIDI Channel | Calibration
-```
-
-Los parámetros de ADSR, forma de onda y reverb se aplican al audio en tiempo real al girar el encoder.
-
----
-
-### `simulador_menu.py` — Simulador de escritorio (Windows/Linux/Mac)
-
-Emula la interfaz LCD en una ventana Tkinter. No requiere hardware.
+Ejecutar en la Raspberry Pi (necesita `menu_engine.py` en la misma carpeta):
 
 ```bash
-python simulador_menu.py
+python3 main.py
 ```
 
-Controles: flechas ↑↓ para girar el encoder, Enter para pulsar.
+| Control | Fuera del menú | Dentro del menú |
+|---|---|---|
+| KEY1–KEY7 | Notas de la escala actual | Notas de la escala actual |
+| Girar encoder | Ajusta el efecto rápido (MORPH / SATURATION / FILTER) | Navegar / cambiar valor |
+| Pulsar encoder | Cambia de efecto rápido | Entrar / confirmar |
+| OCT▲ / OCT▼ | Sube / baja octava (−3 … +3) | — |
+| OCT▲ + OCT▼ a la vez | Abre el menú | Cierra el menú |
+| Sensor láser | Profundidad del trémolo (activo por debajo de ~450 mm) | |
 
----
+Menú (`menu_engine.py`):
 
-### `arpa_un_sensor.py` — Versión mínima (un sensor, sin menú)
+```
+Instrumento → sine | sawtooth | square | violin | guitar | piano
+Escala      → Major | Minor | Penta | Blues | Dorian | HarmMin
+ADSR        → Attack | Decay | Sustain | Release
+EQ          → Low | Mid | High
+Efectos     → Reverb (Room, Wet) | Delay (Time, Feedback)
+```
 
-Versión de prueba: sensor + audio + LEDs, sin pantalla ni menú.
+### `test_tft.py`: prueba de la pantalla
+
+Inicializa la ST7789 a mano por SPI bitbang y dibuja un patrón de prueba con varias configuraciones de tamaño, orientación y offset.
 
 ```bash
-python arpa_un_sensor.py
+python3 test_tft.py        # todas las configuraciones
+python3 test_tft.py 3      # solo la 3
 ```
+
+### Otros archivos
+
+- `main_oled.py`: versión antigua para la protoboard (OLED SH1106 por I2C y pines distintos). **No sirve con la PCB ni con la pantalla actual.**
+- `simulador_menu.py`: simulador del menú antiguo en Tkinter, sin hardware.
+- `arpa_un_sensor.py`: versión mínima, solo sensor y audio.
 
 ---
 
 ## Instalación de dependencias (Raspberry Pi)
 
 ```bash
-pip install adafruit-circuitpython-vl53l0x sounddevice soundfile numpy luma.oled RPi.GPIO --break-system-packages
+pip install adafruit-circuitpython-vl53l0x adafruit-circuitpython-rgb-display \
+            adafruit-blinka gpiozero sounddevice numpy pillow luma.lcd \
+            --break-system-packages
 ```
 
----
-
-## Diseño de hardware
-
-Los esquemáticos de la protoboard están en formato Fritzing (`.fzz`):
-
-- `LaserHarp Protoboard Design.fzz` — v1
-- `LaserHarp Protoboard Design_V2.fzz` — v2
-- `LaserHarp Protoboard Design_V3.beta.fzz` — v3 beta (actual)
+(`luma.lcd` solo hace falta para `test_tft.py`.)
